@@ -1,0 +1,6 @@
+.wwebjs_auth
+.env
+.wwebjs_cache
+node_modules
+dist
+public

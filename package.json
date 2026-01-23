@@ -1,0 +1,142 @@
+{
+  "name": "chromwhatsapp",
+  "version": "2.0.1",
+  "description": "Professional WhatsApp Desktop Application with API & Webhook Support",
+  "main": "main.js",
+  "author": "ChromWhatsApp",
+  "license": "MIT",
+  "homepage": "https://github.com/chromwhatsapp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chromwhatsapp/chromwhatsapp"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "nodemon --exec electron .",
+    "server": "node main.js",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "build:portable": "electron-builder --win portable",
+    "pack": "electron-builder --dir",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "keywords": [
+    "whatsapp",
+    "desktop",
+    "electron",
+    "chat",
+    "messaging",
+    "api",
+    "webhook"
+  ],
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "electron-updater": "^6.1.7",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "puppeteer": "^22.8.2",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.9",
+    "electron-builder": "^24.13.3",
+    "nodemon": "^3.1.11"
+  },
+  "build": {
+    "appId": "com.chromwhatsapp.desktop",
+    "productName": "BedayaWhatsApp",
+    "copyright": "Copyright © 2024 BedayaWhatsApp",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "public/**/*",
+      "package.json",
+      ".env"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/puppeteer/.local-chromium",
+        "to": "puppeteer/.local-chromium",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": false,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/icon.ico",
+      "uninstallerIcon": "public/icon.ico",
+      "installerHeaderIcon": "public/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BedayaWhatsApp"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-Portable.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "public/icon.ico",
+      "category": "public.app-category.social-networking",
+      "artifactName": "${productName}-${version}-mac.${ext}"
+    },
+    "dmg": {
+      "title": "${productName}",
+      "icon": "public/icon.ico"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "tar.gz"
+      ],
+      "icon": "public/icon.ico",
+      "category": "Network",
+      "artifactName": "${productName}-${version}-linux.${ext}"
+    },
+    "appImage": {
+      "artifactName": "${productName}-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "amrelngm6",
+      "repo": "medians-whatsapp-app",
+      "releaseType": "release"
+    }
+  }
+}
