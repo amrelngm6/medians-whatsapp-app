@@ -1,7 +1,7 @@
-# In-App Update System - ChromWhatsApp
+# In-App Update System - BedayaWhatsApp
 
 ## Overview
-ChromWhatsApp now includes a fully-featured automatic update system that allows users to update the application without reinstalling. The system uses `electron-updater` to provide seamless updates directly from the app.
+BedayaWhatsApp now includes a fully-featured automatic update system that allows users to update the application without reinstalling. The system uses `electron-updater` to provide seamless updates directly from the app.
 
 ## Features
 
@@ -195,8 +195,8 @@ The update system is configured in `package.json` under the `build` section:
   "build": {
     "publish": {
       "provider": "github",
-      "owner": "chromwhatsapp",
-      "repo": "chromwhatsapp",
+      "owner": "bedayawhatsapp",
+      "repo": "bedayawhatsapp",
       "releaseType": "release"
     }
   }

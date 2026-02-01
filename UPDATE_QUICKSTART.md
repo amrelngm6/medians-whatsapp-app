@@ -133,7 +133,7 @@ The update system is configured in `package.json`:
     "publish": {
       "provider": "github",
       "owner": "your-username",
-      "repo": "chromwhatsapp",
+      "repo": "bedayawhatsapp",
       "releaseType": "release"
     }
   }
@@ -186,7 +186,7 @@ Updates won't work in dev mode. To test:
 ## File Structure
 
 ```
-ChromWhatsApp/
+BedayaWhatsApp/
 ├── main.js                 # Auto-updater backend
 ├── package.json            # Version & publish config
 ├── AUTO_UPDATE.md          # Full documentation

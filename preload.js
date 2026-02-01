@@ -1,5 +1,5 @@
 /**
- * ChromWhatsApp - Preload Script
+ * BedayaWhatsApp - Preload Script
  * Secure bridge between renderer and main process
  */
 
@@ -8,8 +8,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
     // App info
     getAppInfo: () => ({
-        name: 'ChromWhatsApp',
-        version: '2.0.0'
+        name: 'BedayaWhatsApp',
+        version: '0.1.0'
     }),
 
     // Window controls

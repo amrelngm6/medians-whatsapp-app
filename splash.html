@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChromWhatsApp - Loading</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0a1014 0%, #1a2530 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .splash-container {
+            text-align: center;
+            padding: 40px;
+        }
+
+        .app-logo {
+            font-size: 120px;
+            color: #00a884;
+            margin-bottom: 20px;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .app-name {
+            font-size: 36px;
+            font-weight: 300;
+            color: #e9edef;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+
+        .app-tagline {
+            font-size: 14px;
+            color: #8696a0;
+            margin-bottom: 40px;
+        }
+
+        .loading-container {
+            position: relative;
+            width: 200px;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            margin: 0 auto;
+            overflow: hidden;
+        }
+
+        .loading-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: linear-gradient(90deg, #00a884, #25d366);
+            border-radius: 2px;
+            animation: loading 2s ease-in-out infinite;
+        }
+
+        .loading-text {
+            margin-top: 20px;
+            font-size: 13px;
+            color: #8696a0;
+            animation: fadeInOut 2s ease-in-out infinite;
+        }
+
+        .version {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 12px;
+            color: #667781;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+            50% {
+                transform: scale(1.05);
+                opacity: 0.8;
+            }
+        }
+
+        @keyframes loading {
+            0% {
+                width: 0%;
+                left: 0;
+            }
+            50% {
+                width: 100%;
+                left: 0;
+            }
+            100% {
+                width: 0%;
+                left: 100%;
+            }
+        }
+
+        @keyframes fadeInOut {
+            0%, 100% {
+                opacity: 0.5;
+            }
+            50% {
+                opacity: 1;
+            }
+        }
+
+        .features {
+            display: flex;
+            gap: 30px;
+            justify-content: center;
+            margin-top: 50px;
+            opacity: 0.7;
+        }
+
+        .feature-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .feature-icon {
+            font-size: 24px;
+            color: #00a884;
+        }
+
+        .feature-text {
+            font-size: 11px;
+            color: #8696a0;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+    <div class="splash-container">
+        <div class="app-logo">
+            <i class="fab fa-whatsapp">📱</i>
+        </div>
+        <h1 class="app-name">ChromWhatsApp</h1>
+        <p class="app-tagline">Professional WhatsApp Client</p>
+        
+        <div class="loading-container">
+            <div class="loading-bar"></div>
+        </div>
+        <p class="loading-text" id="loadingText">Initializing application...</p>
+
+        <div class="features">
+            <div class="feature-item">
+                <div class="feature-icon">⚡</div>
+                <div class="feature-text">Fast</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-icon">🔒</div>
+                <div class="feature-text">Secure</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-icon">🚀</div>
+                <div class="feature-text">Reliable</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="version">v1.0.0</div>
+
+    <script>
+        const loadingMessages = [
+            'Initializing application...',
+            'Loading components...',
+            'Setting up connections...',
+            'Almost ready...'
+        ];
+        
+        let messageIndex = 0;
+        const loadingText = document.getElementById('loadingText');
+
+        setInterval(() => {
+            messageIndex = (messageIndex + 1) % loadingMessages.length;
+            loadingText.textContent = loadingMessages[messageIndex];
+        }, 1500);
+    </script>
+</body>
+</html>

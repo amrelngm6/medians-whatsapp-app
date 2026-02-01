@@ -1,14 +1,14 @@
 {
-  "name": "chromwhatsapp",
-  "version": "2.0.1",
+  "name": "bedayawhatsapp",
+  "version": "0.1.0",
   "description": "Professional WhatsApp Desktop Application with API & Webhook Support",
   "main": "main.js",
-  "author": "ChromWhatsApp",
+  "author": "BedayaWhatsApp",
   "license": "MIT",
-  "homepage": "https://github.com/chromwhatsapp",
+  "homepage": "https://github.com/amrelngm6/medians-whatsapp-app",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chromwhatsapp/chromwhatsapp"
+    "url": "https://github.com/amrelngm6/medians-whatsapp-app"
   },
   "scripts": {
     "start": "electron .",
@@ -38,20 +38,20 @@
     "electron-updater": "^6.1.7",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
-    "puppeteer": "^22.8.2",
+    "puppeteer-core": "^23.0.0",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
-    "whatsapp-web.js": "^1.26.0"
+    "whatsapp-web.js": "^1.34.4"
   },
   "devDependencies": {
-    "electron": "^30.0.9",
-    "electron-builder": "^24.13.3",
+    "electron": "^40.0.0",
+    "electron-builder": "^26.6.0",
     "nodemon": "^3.1.11"
   },
   "build": {
-    "appId": "com.chromwhatsapp.desktop",
+    "appId": "com.bedayawhatsapp.desktop",
     "productName": "BedayaWhatsApp",
-    "copyright": "Copyright © 2024 BedayaWhatsApp",
+    "copyright": "Copyright © 2026 BedayaWhatsApp",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -59,27 +59,39 @@
     "files": [
       "main.js",
       "preload.js",
+      "splash.html",
       "public/**/*",
       "package.json",
-      ".env"
+      ".env",
+      "!**/*.md",
+      "!**/*.map",
+      "!**/test/**",
+      "!**/tests/**",
+      "!**/*.test.js",
+      "!**/.git/**",
+      "!**/node_modules/**/README*",
+      "!**/node_modules/**/CHANGELOG*",
+      "!**/node_modules/**/LICENSE*",
+      "!**/node_modules/**/*.d.ts",
+      "!**/node_modules/**/.github/**"
     ],
-    "extraResources": [
-      {
-        "from": "node_modules/puppeteer/.local-chromium",
-        "to": "puppeteer/.local-chromium",
-        "filter": [
-          "**/*"
-        ]
-      }
+    "asarUnpack": [
+      "node_modules/whatsapp-web.js/**/*"
     ],
     "asar": false,
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US",
+      "ar"
+    ],
     "win": {
+      "requestedExecutionLevel": "requireAdministrator",
+      "signAndEditExecutable": true,
       "target": [
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {

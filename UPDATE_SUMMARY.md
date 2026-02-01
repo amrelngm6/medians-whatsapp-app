@@ -1,7 +1,7 @@
 # In-App Update Feature - Implementation Summary
 
 ## Overview
-Added comprehensive in-app update system to ChromWhatsApp that allows users to update the software without reinstalling.
+Added comprehensive in-app update system to BedayaWhatsApp that allows users to update the software without reinstalling.
 
 ## What Was Added
 
@@ -88,19 +88,19 @@ App restarts with new version
 
 ## Files Modified
 
-1. **ChromWhatsApp/main.js** - Backend auto-updater integration
-2. **ChromWhatsApp/package.json** - Dependencies and publish config
-3. **ChromWhatsApp/public/index.html** - Update modal UI
-4. **ChromWhatsApp/public/app.js** - Frontend update logic
-5. **ChromWhatsApp/public/styles.css** - Update modal styling
-6. **ChromWhatsApp/README.md** - User documentation
+1. **BedayaWhatsApp/main.js** - Backend auto-updater integration
+2. **BedayaWhatsApp/package.json** - Dependencies and publish config
+3. **BedayaWhatsApp/public/index.html** - Update modal UI
+4. **BedayaWhatsApp/public/app.js** - Frontend update logic
+5. **BedayaWhatsApp/public/styles.css** - Update modal styling
+6. **BedayaWhatsApp/README.md** - User documentation
 
 ## Files Created
 
-1. **ChromWhatsApp/AUTO_UPDATE.md** - Complete update system documentation
-2. **ChromWhatsApp/install-updater.bat** - Windows installer script
-3. **ChromWhatsApp/install-updater.sh** - Unix installer script
-4. **ChromWhatsApp/UPDATE_SUMMARY.md** - This file
+1. **BedayaWhatsApp/AUTO_UPDATE.md** - Complete update system documentation
+2. **BedayaWhatsApp/install-updater.bat** - Windows installer script
+3. **BedayaWhatsApp/install-updater.sh** - Unix installer script
+4. **BedayaWhatsApp/UPDATE_SUMMARY.md** - This file
 
 ## Installation
 

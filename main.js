@@ -5,12 +5,15 @@ const http = require('http');
 const socketIo = require('socket.io');
 const qrcode = require('qrcode');
 const fs = require('fs');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+// const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia, Buttons, List } = require('whatsapp-web.js');
+
 const axios = require('axios');
 const crypto = require('crypto');
 const multer = require('multer');
 require('dotenv').config();
-const puppeteer = require('puppeteer');
+// Note: We don't actually need puppeteer directly - whatsapp-web.js uses it internally
+// We just need to provide the config. Remove the unused import.
 const { nativeImage } = require('electron');
 const cors = require('cors');
 const { autoUpdater } = require('electron-updater');
@@ -58,6 +61,16 @@ let isAuthenticated = false;
 let isClientReady = false;
 let clientState = 'disconnected';
 let currentSessionId = null; // Track current session
+let isReinitializing = false;
+let fallbackPollingActive = false; // Track if fallback polling is running
+const authFailureRetries = new Map();
+
+// Session health tracking
+let sessionInitStartTime = null;
+let sessionHealthCheckInterval = null;
+const SESSION_INIT_TIMEOUT_MS = 180000; // 3 minutes max for full initialization
+const SESSION_LOADING_TIMEOUT_MS = 120000; // 2 minutes max for loading after auth
+const SESSION_STUCK_THRESHOLD_MS = 300000; // 5 minutes absolute max before force cleanup
 
 // Device Management
 const devicesFile = path.join(__dirname, 'devices.json');
@@ -66,6 +79,137 @@ let registeredDevices = [];
 // Session Management
 const sessionsFile = path.join(__dirname, 'sessions.json');
 let sessions = [];
+
+function getSessionAuthDir(sessionId) {
+    // Use the same path as LocalAuth uses
+    try {
+        const { app } = require('electron');
+        return path.join(app.getPath('userData'), 'wwebjs_auth', `session-${sessionId}`);
+    } catch (e) {
+        // Fallback for when app is not ready
+        return path.join(__dirname, '.wwebjs_auth', `session-${sessionId}`);
+    }
+}
+
+function clearSessionAuthData(sessionId) {
+    // Clear from userData path (primary)
+    try {
+        const { app } = require('electron');
+        const userDataSessionDir = path.join(app.getPath('userData'), 'wwebjs_auth', `session-${sessionId}`);
+        if (fs.existsSync(userDataSessionDir)) {
+            fs.rmSync(userDataSessionDir, { recursive: true, force: true });
+            console.log(`Cleared session auth data from userData: ${userDataSessionDir}`);
+        }
+    } catch (e) {
+        console.error('Error clearing userData session:', e.message);
+    }
+    
+    // Also clear from legacy path if exists
+    const legacySessionDir = path.join(__dirname, '.wwebjs_auth', `session-${sessionId}`);
+    if (fs.existsSync(legacySessionDir)) {
+        fs.rmSync(legacySessionDir, { recursive: true, force: true });
+        console.log(`Cleared legacy session auth data: ${legacySessionDir}`);
+    }
+}
+
+// Force cleanup stuck session and reinitialize
+async function forceCleanupAndReinitialize(sessionId, reason) {
+    console.log(`Force cleanup triggered for session ${sessionId}: ${reason}`);
+    
+    // Stop health check
+    stopSessionHealthCheck();
+    
+    // Reset fallback polling flag
+    fallbackPollingActive = false;
+    
+    // Destroy current client if exists
+    if (whatsappClient) {
+        try {
+            await whatsappClient.destroy();
+        } catch (destroyErr) {
+            console.error('Error destroying client during force cleanup:', destroyErr.message);
+        }
+        whatsappClient = null;
+    }
+    
+    // Reset state
+    isClientReady = false;
+    isAuthenticated = false;
+    clientState = 'disconnected';
+    qrCodeData = null;
+    
+    // Clear the corrupted session data
+    clearSessionAuthData(sessionId);
+    
+    // Notify UI
+    io.emit('session-force-cleared', { 
+        sessionId: sessionId, 
+        reason: reason,
+        message: `Session was automatically cleared due to: ${reason}. Please scan QR code again.`
+    });
+    io.emit('status', { 
+        status: 'reconnecting', 
+        message: 'Session was corrupted and has been cleared. Reinitializing...' 
+    });
+    
+    // Wait a bit before reinitializing
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Reinitialize with fresh session
+    try {
+        await initializeWhatsAppClient(sessionId);
+    } catch (reinitError) {
+        console.error('Failed to reinitialize after force cleanup:', reinitError.message);
+        io.emit('error', { message: 'Failed to reinitialize. Please restart the application.' });
+    }
+}
+
+// Session health monitoring
+function startSessionHealthCheck(sessionId) {
+    stopSessionHealthCheck(); // Clear any existing interval FIRST
+    sessionInitStartTime = Date.now(); // THEN set the start time
+    
+    console.log(`Starting session health check for: ${sessionId}`);
+    
+    sessionHealthCheckInterval = setInterval(async () => {
+        const elapsed = Date.now() - sessionInitStartTime;
+        
+        // Check for absolute stuck threshold (5 minutes)
+        if (!isClientReady && elapsed > SESSION_STUCK_THRESHOLD_MS) {
+            console.log(`Session ${sessionId} stuck for ${elapsed/1000}s - forcing cleanup`);
+            clearInterval(sessionHealthCheckInterval);
+            sessionHealthCheckInterval = null;
+            await forceCleanupAndReinitialize(sessionId, 'Session stuck for too long (5+ minutes)');
+            return;
+        }
+        
+        // Check for loading timeout (2 minutes after authentication)
+        if (isAuthenticated && !isClientReady && clientState === 'loading') {
+            // Find when we authenticated (approximate)
+            if (elapsed > SESSION_LOADING_TIMEOUT_MS) {
+                console.log(`Session ${sessionId} stuck in loading state - forcing cleanup`);
+                clearInterval(sessionHealthCheckInterval);
+                sessionHealthCheckInterval = null;
+                await forceCleanupAndReinitialize(sessionId, 'Loading took too long after authentication');
+                return;
+            }
+        }
+        
+        // If ready, stop monitoring
+        if (isClientReady) {
+            console.log('Session is ready, stopping health check');
+            stopSessionHealthCheck();
+        }
+    }, 10000); // Check every 10 seconds
+}
+
+function stopSessionHealthCheck() {
+    if (sessionHealthCheckInterval) {
+        clearInterval(sessionHealthCheckInterval);
+        sessionHealthCheckInterval = null;
+    }
+    sessionInitStartTime = null;
+}
 
 // Auto-Updater Configuration
 autoUpdater.autoDownload = false; // Don't auto-download, let user choose
@@ -91,14 +235,12 @@ autoUpdater.logger = {
 
 // Auto-Updater Event Handlers
 autoUpdater.on('checking-for-update', () => {
-    console.log('Checking for updates...');
     updateInfo.available = false;
     updateInfo.error = null;
     io.emit('update-checking');
 });
 
 autoUpdater.on('update-available', (info) => {
-    console.log('Update available:', info.version);
     updateInfo.available = true;
     updateInfo.version = info.version;
     updateInfo.releaseNotes = info.releaseNotes;
@@ -111,7 +253,6 @@ autoUpdater.on('update-available', (info) => {
 });
 
 autoUpdater.on('update-not-available', (info) => {
-    console.log('No updates available');
     updateInfo.available = false;
     io.emit('update-not-available', { version: info.version });
 });
@@ -129,7 +270,6 @@ autoUpdater.on('download-progress', (progress) => {
 });
 
 autoUpdater.on('update-downloaded', (info) => {
-    console.log('Update downloaded, ready to install');
     updateInfo.downloading = false;
     updateInfo.downloaded = true;
     io.emit('update-downloaded', {
@@ -265,7 +405,6 @@ async function sendWebhook(event, data) {
 
 // Socket.IO connection
 io.on('connection', (socket) => {
-    console.log('Client connected via Socket.IO');
 
     // Send current state including sessions
     socket.emit('state', {
@@ -282,23 +421,89 @@ io.on('connection', (socket) => {
         try {
             const session = sessions.find(s => s.id === sessionId);
             if (!session) {
-                socket.emit('error', { message: 'Session not found' });
+                socket.emit('session-init-failed', { message: 'Session not found' });
                 return;
             }
 
+            // Stop any existing health check
+            stopSessionHealthCheck();
+
             // Disconnect current client if exists
             if (whatsappClient) {
-                await whatsappClient.destroy();
+                try {
+                    await whatsappClient.destroy();
+                } catch (destroyErr) {
+                    console.error('Error destroying existing client:', destroyErr.message);
+                }
                 whatsappClient = null;
                 isClientReady = false;
                 isAuthenticated = false;
                 clientState = 'disconnected';
             }
 
-            // Initialize with selected session
-            await initializeWhatsAppClient(sessionId);
-            
+            // Emit session selected first so UI knows we're connecting
             socket.emit('sessionSelected', { sessionId: sessionId });
+            io.emit('status', { status: 'connecting', message: 'Initializing WhatsApp client...' });
+
+            // Start session health monitoring (will auto-cleanup if stuck)
+            startSessionHealthCheck(sessionId);
+
+            // Initialize with selected session
+            try {
+                await initializeWhatsAppClient(sessionId);
+            } catch (initError) {
+                console.error('Session initialization error:', initError.message);
+                // If initialization fails, check if we should clear the session
+                if (initError.message.includes('timeout') || initError.message.includes('Target closed') || initError.message.includes('Session')) {
+                    console.log('Initialization failed with recoverable error - clearing session');
+                    clearSessionAuthData(sessionId);
+                    io.emit('session-init-failed', { 
+                        message: 'Session data was corrupted and has been cleared. Please try again.',
+                        sessionId: sessionId 
+                    });
+                } else {
+                    throw initError;
+                }
+            }
+        } catch (error) {
+            console.error('Session selection error:', error.message);
+            stopSessionHealthCheck();
+            socket.emit('session-init-failed', { message: error.message });
+        }
+    });
+
+    // Handle clear session (clears auth data but keeps session)
+    socket.on('clearSession', async (sessionId) => {
+        try {
+            const session = sessions.find(s => s.id === sessionId);
+            if (!session) {
+                socket.emit('error', { message: 'Session not found' });
+                return;
+            }
+
+            // If this is the current session, disconnect first
+            if (sessionId === currentSessionId && whatsappClient) {
+                try {
+                    await whatsappClient.destroy();
+                } catch (destroyErr) {
+                    console.error('Error destroying client:', destroyErr.message);
+                }
+                whatsappClient = null;
+                isClientReady = false;
+                isAuthenticated = false;
+                clientState = 'disconnected';
+                currentSessionId = null;
+            }
+
+            // Clear auth data
+            clearSessionAuthData(sessionId);
+            
+            // Mark session as inactive
+            session.active = false;
+            saveSessions();
+
+            socket.emit('sessionCleared', { sessionId: sessionId, message: 'Session cleared successfully' });
+            io.emit('sessionsUpdated', { sessions: sessions });
         } catch (error) {
             socket.emit('error', { message: error.message });
         }
@@ -330,6 +535,81 @@ io.on('connection', (socket) => {
     });
 });
 
+// Fallback polling function for when loading_screen event doesn't fire
+async function startFallbackReadyPolling() {
+    if (fallbackPollingActive || isClientReady) {
+        console.log('Fallback polling skipped - already active or client ready');
+        return;
+    }
+    
+    fallbackPollingActive = true;
+    let pollAttempts = 0;
+    const maxPollAttempts = 60; // 60 attempts * 2 seconds = 120 seconds max
+    
+    const pollInterval = setInterval(async () => {
+        pollAttempts++;
+        console.log(`Fallback polling for client state (attempt ${pollAttempts}/${maxPollAttempts})...`);
+        
+        if (isClientReady) {
+            console.log('Client became ready, stopping fallback poll');
+            clearInterval(pollInterval);
+            fallbackPollingActive = false;
+            return;
+        }
+        
+        // Check if whatsappClient still exists
+        if (!whatsappClient) {
+            console.log('WhatsApp client was destroyed, stopping fallback poll');
+            clearInterval(pollInterval);
+            fallbackPollingActive = false;
+            return;
+        }
+        
+        try {
+            // Use getState() which is more reliable
+            const state = await whatsappClient.getState();
+            console.log(`Fallback poll - Client state: ${state}`);
+            
+            if (state === 'CONNECTED') {
+                const info = whatsappClient.info;
+                if (info && info.wid) {
+                    console.log('Client info available via fallback polling - triggering ready manually');
+                    clearInterval(pollInterval);
+                    fallbackPollingActive = false;
+                    stopSessionHealthCheck();
+                    
+                    isClientReady = true;
+                    clientState = 'ready';
+                    qrCodeData = null;
+                    if (currentSessionId) {
+                        authFailureRetries.delete(currentSessionId);
+                    }
+                    
+                    console.log('Logged in as:', info.pushname);
+                    io.emit('ready', {
+                        pushname: info.pushname,
+                        number: info.wid.user
+                    });
+                    await sendWebhook('ready', {
+                        pushname: info.pushname,
+                        number: info.wid.user
+                    });
+                } else {
+                    console.log('State is CONNECTED but info not yet available, will retry...');
+                }
+            }
+        } catch (err) {
+            console.log('Fallback poll - Client state check failed:', err.message);
+        }
+        
+        if (pollAttempts >= maxPollAttempts) {
+            console.log('Fallback polling max attempts reached');
+            clearInterval(pollInterval);
+            fallbackPollingActive = false;
+        }
+    }, 2000);
+}
+
 // Setup WhatsApp client event listeners
 function setupClientEventListeners(client) {
     // QR Code event
@@ -347,7 +627,107 @@ function setupClientEventListeners(client) {
         isAuthenticated = true;
         clientState = 'authenticated';
         io.emit('authenticated');
+        // Emit status to show user that we're loading after authentication
+        io.emit('status', { status: 'loading', message: 'Authenticated! Loading WhatsApp data...' });
         sendWebhook('authenticated', {});
+        
+        // Start a fallback polling mechanism in case loading_screen event doesn't fire
+        // This handles cases where cached sessions skip the loading_screen event
+        setTimeout(() => {
+            if (!isClientReady && whatsappClient) {
+                console.log('Starting fallback polling after authentication...');
+                startFallbackReadyPolling();
+            }
+        }, 5000); // Wait 5 seconds after auth before starting fallback
+    });
+
+    // Loading screen event - tracks WhatsApp loading progress
+    client.on('loading_screen', (percent, message) => {
+        console.log(`WhatsApp loading: ${percent}% - ${message}`);
+        clientState = 'loading';
+        io.emit('status', { status: 'loading', message: `Loading WhatsApp: ${percent}% - ${message}` });
+        
+        // When loading reaches 100%, start polling for client state (fallback for ready event)
+        if (percent >= 100 && !isClientReady) {
+            console.log('Loading complete, starting client state polling...');
+            let pollAttempts = 0;
+            const maxPollAttempts = 45; // 45 attempts * 2 seconds = 90 seconds max
+            
+            const pollInterval = setInterval(async () => {
+                pollAttempts++;
+                console.log(`Polling for client state (attempt ${pollAttempts}/${maxPollAttempts})...`);
+                
+                if (isClientReady) {
+                    console.log('Client became ready, stopping poll');
+                    clearInterval(pollInterval);
+                    stopSessionHealthCheck(); // Stop health monitoring
+                    return;
+                }
+                
+                // Check if whatsappClient still exists (might have been destroyed during cleanup)
+                if (!whatsappClient) {
+                    console.log('WhatsApp client was destroyed, stopping poll');
+                    clearInterval(pollInterval);
+                    return;
+                }
+                
+                try {
+                    // Use getState() which is more reliable than checking client.info directly
+                    const state = await whatsappClient.getState();
+                    console.log(`Client state: ${state}`);
+                    
+                    if (state === 'CONNECTED') {
+                        // Client is connected, now check for info
+                        const info = whatsappClient.info;
+                        if (info && info.wid) {
+                            console.log('Client info available via polling - triggering ready manually');
+                            clearInterval(pollInterval);
+                            stopSessionHealthCheck(); // Stop health monitoring
+                            
+                            isClientReady = true;
+                            clientState = 'ready';
+                            qrCodeData = null;
+                            if (currentSessionId) {
+                                authFailureRetries.delete(currentSessionId);
+                            }
+                            
+                            console.log('Logged in as:', info.pushname);
+                            io.emit('ready', {
+                                pushname: info.pushname,
+                                number: info.wid.user
+                            });
+                            await sendWebhook('ready', {
+                                pushname: info.pushname,
+                                number: info.wid.user
+                            });
+                        } else {
+                            console.log('State is CONNECTED but info not yet available, will retry...');
+                        }
+                    }
+                } catch (err) {
+                    console.log('Client state check failed:', err.message);
+                }
+                
+                if (pollAttempts >= maxPollAttempts) {
+                    console.log('Max poll attempts reached after loading complete - triggering session cleanup');
+                    clearInterval(pollInterval);
+                    // Let the health check handle the cleanup if it's still running
+                    // or trigger manual cleanup
+                    if (currentSessionId && !isClientReady) {
+                        io.emit('status', { 
+                            status: 'error', 
+                            message: 'Client failed to become ready. Automatically clearing session...' 
+                        });
+                        // Trigger cleanup after a short delay
+                        setTimeout(async () => {
+                            if (!isClientReady && currentSessionId) {
+                                await forceCleanupAndReinitialize(currentSessionId, 'Client info polling exhausted after loading complete');
+                            }
+                        }, 3000);
+                    }
+                }
+            }, 2000); // Poll every 2 seconds
+        }
     });
 
     // Ready event
@@ -356,20 +736,40 @@ function setupClientEventListeners(client) {
         isClientReady = true;
         clientState = 'ready';
         qrCodeData = null;
+        stopSessionHealthCheck(); // Stop health monitoring - client is ready
+        if (currentSessionId) {
+            authFailureRetries.delete(currentSessionId);
+        }
 
         try {
-            const info = client.info;
-            console.log('Logged in as:', info.pushname);
-            io.emit('ready', {
-                pushname: info.pushname,
-                number: info.wid.user
-            });
-            await sendWebhook('ready', {
-                pushname: info.pushname,
-                number: info.wid.user
-            });
+            // Use whatsappClient as fallback if client.info is not available
+            const activeClient = whatsappClient || client;
+            const info = activeClient.info;
+            if (info && info.wid) {
+                console.log('Logged in as:', info.pushname);
+                io.emit('ready', {
+                    pushname: info.pushname,
+                    number: info.wid.user
+                });
+                await sendWebhook('ready', {
+                    pushname: info.pushname,
+                    number: info.wid.user
+                });
+            } else {
+                // Fallback: emit ready without user info
+                console.log('Client ready but info not immediately available');
+                io.emit('ready', {
+                    pushname: 'Unknown',
+                    number: 'Unknown'
+                });
+            }
         } catch (err) {
             console.error('Error getting client info:', err);
+            // Still emit ready even if we can't get info
+            io.emit('ready', {
+                pushname: 'Unknown',
+                number: 'Unknown'
+            });
         }
     });
 
@@ -420,8 +820,52 @@ function setupClientEventListeners(client) {
     client.on('auth_failure', async (msg) => {
         console.error('Authentication failure:', msg);
         clientState = 'auth_failure';
+        stopSessionHealthCheck(); // Stop health monitoring
         io.emit('auth_failure', { message: msg });
         await sendWebhook('auth_failure', { message: msg });
+
+        const sessionId = currentSessionId;
+        if (!sessionId || isReinitializing) return;
+
+        const retryCount = authFailureRetries.get(sessionId) || 0;
+        if (retryCount >= 1) {
+            // Already retried once, clear session completely
+            console.log('Auth failure after retry - clearing session completely');
+            clearSessionAuthData(sessionId);
+            io.emit('status', { status: 'error', message: 'Authentication failed multiple times. Session has been cleared. Please scan QR code again.' });
+            return;
+        }
+
+        authFailureRetries.set(sessionId, retryCount + 1);
+        isReinitializing = true;
+
+        try {
+            if (whatsappClient) {
+                try {
+                    await whatsappClient.destroy();
+                } catch (destroyErr) {
+                    console.error('Error destroying client after auth failure:', destroyErr.message);
+                }
+                whatsappClient = null;
+            }
+
+            isAuthenticated = false;
+            isClientReady = false;
+            clientState = 'disconnected';
+            qrCodeData = null;
+
+            clearSessionAuthData(sessionId);
+            io.emit('status', { status: 'disconnected', message: 'Session reset. Generating new QR...' });
+
+            // Start health check for new attempt
+            startSessionHealthCheck(sessionId);
+            await initializeWhatsAppClient(sessionId);
+        } catch (reinitErr) {
+            console.error('Failed to reinitialize after auth failure:', reinitErr.message);
+            stopSessionHealthCheck();
+        } finally {
+            isReinitializing = false;
+        }
     });
 
     // Disconnected event
@@ -430,8 +874,17 @@ function setupClientEventListeners(client) {
         isAuthenticated = false;
         isClientReady = false;
         clientState = 'disconnected';
+        stopSessionHealthCheck(); // Stop health monitoring
         io.emit('disconnected', { reason: reason });
         await sendWebhook('disconnected', { reason: reason });
+        
+        // If disconnected due to session issues, auto-clear
+        if (reason === 'NAVIGATION' || reason === 'LOGOUT' || reason === 'CONFLICT') {
+            console.log(`Disconnected due to ${reason} - clearing session cache`);
+            if (currentSessionId) {
+                clearSessionAuthData(currentSessionId);
+            }
+        }
     });
 }
 
@@ -461,24 +914,27 @@ async function initializeWhatsAppClient(sessionId = 'default') {
         ];
 
         // First, try to find system Chrome
-        for (const path of possibleChromePaths) {
-            if (path && fs.existsSync(path)) {
-                chromePath = path;
+        for (const p of possibleChromePaths) {
+            if (p && fs.existsSync(p)) {
+                chromePath = p;
                 console.log('Using system Chrome:', chromePath);
                 break;
             }
         }
 
-        // If system Chrome not found, try Puppeteer's bundled Chrome
+        // If system Chrome not found, try Microsoft Edge as fallback
         if (!chromePath) {
-            try {
-                const puppeteerChrome = puppeteer.executablePath();
-                if (fs.existsSync(puppeteerChrome)) {
-                    chromePath = puppeteerChrome;
-                    console.log('Using Puppeteer Chrome:', chromePath);
+            const edgePaths = [
+                'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+                'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+                process.env.LOCALAPPDATA + '\\Microsoft\\Edge\\Application\\msedge.exe'
+            ];
+            for (const edgePath of edgePaths) {
+                if (edgePath && fs.existsSync(edgePath)) {
+                    chromePath = edgePath;
+                    console.log('Using Microsoft Edge:', chromePath);
+                    break;
                 }
-            } catch (err) {
-                console.log('Puppeteer Chrome not available');
             }
         }
 
@@ -514,22 +970,19 @@ async function initializeWhatsAppClient(sessionId = 'default') {
         } else {
             throw new Error('Chrome executable not found. Please install Google Chrome.');
         }
-
+        
+        const authPath = path.join(app.getPath('userData'), 'wwebjs_auth');
         whatsappClient = new Client({
             authStrategy: new LocalAuth({
                 clientId: sessionId,
-                dataPath: path.join(__dirname, '.wwebjs_auth')
+                dataPath: authPath
             }),
             puppeteer: puppeteerConfig,
-            authTimeoutMs: 60000,
+            authTimeoutMs: 120000,
             qrTimeoutMs: 60000,
             restartOnAuthFail: true,
             takeoverOnConflict: false,
-            takeoverTimeoutMs: 0,
-            // webVersionCache: {
-            //     type: 'remote',
-            //     remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-            // }
+            takeoverTimeoutMs: 0
         });
 
         // Setup event listeners
@@ -566,14 +1019,14 @@ async function initializeWhatsAppClient(sessionId = 'default') {
                     whatsappClient = new Client({
                         authStrategy: new LocalAuth({
                             clientId: sessionId,
-                            dataPath: path.join(__dirname, '.wwebjs_auth')
+                            dataPath: authPath
                         }),
                         puppeteer: puppeteerConfig,
-                        authTimeoutMs: 60000,
+                        authTimeoutMs: 120000,
                         qrTimeoutMs: 60000,
                         restartOnAuthFail: true,
                         takeoverOnConflict: false,
-                        takeoverTimeoutMs: 0,
+                        takeoverTimeoutMs: 0
                     });
                     
                     // Re-attach event listeners
@@ -635,6 +1088,120 @@ expressApp.post('/api/sessions', (req, res) => {
     }
 });
 
+// Clear session auth data (keeps session but clears authentication)
+expressApp.post('/api/sessions/:sessionId/clear', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        
+        const session = sessions.find(s => s.id === sessionId);
+        if (!session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // Stop health check
+        stopSessionHealthCheck();
+
+        // If this is the current session, disconnect first
+        if (sessionId === currentSessionId && whatsappClient) {
+            try {
+                await whatsappClient.destroy();
+            } catch (destroyErr) {
+                console.error('Error destroying client:', destroyErr.message);
+            }
+            whatsappClient = null;
+            isClientReady = false;
+            isAuthenticated = false;
+            clientState = 'disconnected';
+            currentSessionId = null;
+            qrCodeData = null;
+        }
+
+        // Clear auth data
+        clearSessionAuthData(sessionId);
+        
+        // Mark session as inactive
+        session.active = false;
+        saveSessions();
+
+        io.emit('sessionsUpdated', { sessions: sessions });
+        io.emit('status', { status: 'disconnected', message: 'Session cleared successfully' });
+        res.json({ success: true, message: 'Session auth data cleared successfully' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Force clear and reinitialize a stuck session
+expressApp.post('/api/sessions/:sessionId/force-clear', async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        
+        const session = sessions.find(s => s.id === sessionId);
+        if (!session) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        console.log(`Force clear requested for session: ${sessionId}`);
+        
+        // Stop health check
+        stopSessionHealthCheck();
+        
+        // Force destroy client
+        if (whatsappClient) {
+            try {
+                await whatsappClient.destroy();
+            } catch (destroyErr) {
+                console.error('Error force destroying client:', destroyErr.message);
+            }
+            whatsappClient = null;
+        }
+        
+        // Reset all state
+        isClientReady = false;
+        isAuthenticated = false;
+        clientState = 'disconnected';
+        qrCodeData = null;
+        currentSessionId = null;
+        isReinitializing = false;
+        authFailureRetries.delete(sessionId);
+        
+        // Clear auth data completely
+        clearSessionAuthData(sessionId);
+        
+        // Mark session as inactive
+        session.active = false;
+        saveSessions();
+
+        io.emit('sessionsUpdated', { sessions: sessions });
+        io.emit('status', { status: 'disconnected', message: 'Session force-cleared. Ready to reconnect.' });
+        io.emit('session-force-cleared', { sessionId: sessionId, reason: 'Manual force clear' });
+        
+        res.json({ success: true, message: 'Session force-cleared successfully. Please reconnect.' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get session health status
+expressApp.get('/api/sessions/health', (req, res) => {
+    const healthInfo = {
+        currentSession: currentSessionId,
+        clientState: clientState,
+        isAuthenticated: isAuthenticated,
+        isClientReady: isClientReady,
+        isReinitializing: isReinitializing,
+        sessionInitStartTime: sessionInitStartTime,
+        elapsedMs: sessionInitStartTime ? Date.now() - sessionInitStartTime : null,
+        healthCheckActive: sessionHealthCheckInterval !== null,
+        thresholds: {
+            initTimeoutMs: SESSION_INIT_TIMEOUT_MS,
+            loadingTimeoutMs: SESSION_LOADING_TIMEOUT_MS,
+            stuckThresholdMs: SESSION_STUCK_THRESHOLD_MS
+        }
+    };
+    res.json(healthInfo);
+});
+
 // Delete session
 expressApp.delete('/api/sessions/:sessionId', async (req, res) => {
     try {
@@ -650,15 +1217,13 @@ expressApp.delete('/api/sessions/:sessionId', async (req, res) => {
             return res.status(404).json({ error: 'Session not found' });
         }
 
-        // Remove session data directory
-        const sessionDir = path.join(__dirname, '.wwebjs_auth', `session-${sessionId}`);
-        if (fs.existsSync(sessionDir)) {
-            fs.rmSync(sessionDir, { recursive: true, force: true });
-        }
+        // Remove session data from all possible locations
+        clearSessionAuthData(sessionId);
 
         sessions.splice(sessionIndex, 1);
         saveSessions();
 
+        io.emit('sessionsUpdated', { sessions: sessions });
         res.json({ success: true, message: 'Session deleted successfully' });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -675,20 +1240,32 @@ expressApp.post('/api/sessions/switch/:sessionId', async (req, res) => {
             return res.status(404).json({ error: 'Session not found' });
         }
 
+        // Stop existing health check
+        stopSessionHealthCheck();
+
         // Disconnect current client if exists
         if (whatsappClient) {
-            await whatsappClient.destroy();
+            try {
+                await whatsappClient.destroy();
+            } catch (e) {
+                console.error('Error destroying client during switch:', e.message);
+            }
             whatsappClient = null;
             isClientReady = false;
             isAuthenticated = false;
             clientState = 'disconnected';
+            qrCodeData = null;
         }
+
+        // Start health monitoring for new session
+        startSessionHealthCheck(sessionId);
 
         // Initialize with new session
         await initializeWhatsAppClient(sessionId);
 
         res.json({ success: true, message: 'Switching to session', sessionId: sessionId });
     } catch (error) {
+        stopSessionHealthCheck();
         res.status(500).json({ error: error.message });
     }
 });
@@ -754,7 +1331,7 @@ expressApp.post('/api/updates/install', (req, res) => {
 });
 
 // Get status
-expressApp.get('/api/status', verifyDeviceToken, (req, res) => {
+expressApp.get('/api/status', verifyDeviceToken, async (req, res) => {
     let clientInfo = null;
     if (isClientReady && whatsappClient && whatsappClient.info) {
         clientInfo = {
@@ -763,6 +1340,8 @@ expressApp.get('/api/status', verifyDeviceToken, (req, res) => {
             platform: whatsappClient.info.platform
         };
     }
+    
+
     res.json({
         state: clientState,
         authenticated: isAuthenticated,
@@ -803,34 +1382,140 @@ expressApp.get('/api/chats', verifyDeviceToken, async (req, res) => {
             return res.status(400).json({ error: 'Client not ready' });
         }
 
-        const chats = await whatsappClient.getChats();
-        const chatList = chats.map(chat => {
-            // Safely access chat properties
-            const chatId = chat.id?._serialized || chat.id || '';
-            const lastMsg = chat.lastMessage || null;
+        let chatList = [];
+        
+        try {
+            // Try to get chats using a more robust direct method
+            const rawChats = await whatsappClient.pupPage.evaluate(async () => {
+                const chats = window.Store.Chat.getModelsArray();
+                return chats.map(chat => {
+                    try {
+                        const lastMsg = chat.lastReceivedKey 
+                            ? window.Store.Msg.get(chat.lastReceivedKey._serialized) 
+                            : null;
+                        
+                        return {
+                            id: chat.id?._serialized || '',
+                            name: chat.name || chat.formattedTitle || chat.contact?.pushname || chat.contact?.name || 'Unknown',
+                            isGroup: chat.isGroup || false,
+                            unreadCount: chat.unreadCount || 0,
+                            timestamp: chat.t || Date.now() / 1000,
+                            archived: chat.archive || false,
+                            pinned: chat.pin ? true : false,
+                            isMuted: chat.mute?.expiration !== 0,
+                            isReadOnly: chat.isReadOnly || false,
+                            lastMessage: lastMsg ? {
+                                body: lastMsg.body || '',
+                                timestamp: lastMsg.t || Date.now() / 1000,
+                                from: lastMsg.from?._serialized || '',
+                                fromMe: lastMsg.id?.fromMe || false
+                            } : null
+                        };
+                    } catch (e) {
+                        return {
+                            id: chat.id?._serialized || '',
+                            name: chat.name || 'Unknown',
+                            isGroup: false,
+                            unreadCount: 0,
+                            timestamp: Date.now() / 1000,
+                            archived: false,
+                            pinned: false,
+                            isMuted: false,
+                            isReadOnly: false,
+                            lastMessage: null
+                        };
+                    }
+                });
+            });
             
-            return {
-                id: chatId,
-                name: chat.name || 'Unknown',
-                isGroup: chat.isGroup || false,
-                unreadCount: chat.unreadCount || 0,
-                timestamp: chat.timestamp || Date.now(),
-                archived: chat.archived || false,
-                pinned: chat.pinned || false,
-                isMuted: chat.isMuted || false,
-                isReadOnly: chat.isReadOnly || false,
-                markedUnread: false,
-                // markedUnread: (chat.markedUnread !== undefined && chat.markedUnread !== null) ? chat.markedUnread : false,
-                lastMessage: lastMsg ? {
-                    body: lastMsg.body || '',
-                    timestamp: lastMsg.timestamp || Date.now(),
-                    from: lastMsg.from || '',
-                    fromMe: lastMsg.fromMe || false
-                } : null
-            };
-        });
+            chatList = rawChats.filter(c => c && c.id);
+            console.log(`Loaded ${chatList.length} chats successfully`);
+            
+        } catch (directError) {
+            console.error('Direct chat fetch failed:', directError.message);
+            
+            // Fallback: try the standard method with individual error handling
+            try {
+                const chats = await whatsappClient.getChats();
+                for (const chat of chats) {
+                    try {
+                        const chatId = chat.id?._serialized || chat.id?.user || '';
+                        const lastMsg = chat.lastMessage || null;
+                        
+                        chatList.push({
+                            id: chatId,
+                            name: chat.name || chat.pushname || chat.formattedTitle || 'Unknown',
+                            isGroup: chat.isGroup || false,
+                            unreadCount: chat.unreadCount || 0,
+                            timestamp: chat.timestamp || chat.t || Date.now(),
+                            archived: chat.archived || chat.archive || false,
+                            pinned: chat.pinned || chat.pin || false,
+                            isMuted: chat.isMuted || false,
+                            isReadOnly: chat.isReadOnly || false,
+                            lastMessage: lastMsg ? {
+                                body: lastMsg.body || '',
+                                timestamp: lastMsg.timestamp || Date.now(),
+                                from: lastMsg.from || '',
+                                fromMe: lastMsg.fromMe || false
+                            } : null
+                        });
+                    } catch (chatError) {
+                        console.warn('Error processing individual chat:', chatError.message);
+                    }
+                }
+            } catch (fallbackError) {
+                console.error('Fallback chat fetch also failed:', fallbackError.message);
+                return res.status(500).json({ error: 'Failed to load chats. Please try reconnecting.' });
+            }
+        }
 
         res.json({ chats: chatList });
+    } catch (error) {
+        console.error('Get chats error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get Message by ID
+expressApp.get('/api/message/:messageId', verifyDeviceToken, async (req, res) => {
+    try {
+        if (!isClientReady) {
+            return res.status(400).json({ error: 'Client not ready' });
+        }
+        const { messageId } = req.params;
+        const withMedia = req.query.withMedia || 'false';
+        const message = await whatsappClient.getMessageById(messageId);
+        if (!message) {
+            return res.status(404).json({ error: 'Message not found' });
+        }
+        const messageData = {
+            id: message.id._serialized,
+            body: message.body,
+            from: message.from,
+            to: message.to,
+            fromMe: message.fromMe,
+            timestamp: message.timestamp,
+            hasMedia: message.hasMedia,
+            type: message.type,
+            ack: message.ack
+        };
+        // Download media if available
+        if (message.hasMedia && withMedia == 'true') {
+            try {
+                const media = await message.downloadMedia();
+                messageData.media = {
+                    data: media.data,
+                    mimetype: media.mimetype,
+                    filename: media.filename
+                };
+                console.log(`Media downloaded for message ${message.id._serialized}`);         
+
+            } catch (mediaError) {
+                console.error(`Failed to download media for message ${message.id._serialized}:`, mediaError);
+                messageData.mediaError = 'Failed to download media';
+            }
+        }
+        res.json({ message: messageData });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -845,21 +1530,44 @@ expressApp.get('/api/messages/:chatId', verifyDeviceToken, async (req, res) => {
 
         const { chatId } = req.params;
         const limit = parseInt(req.query.limit) || 50;
-
+        const withMedia = req.query.withMedia === 'true';
+        console.log(`Fetching up to ${limit} messages from chat ${chatId} (withMedia=${withMedia})`);
         const chat = await whatsappClient.getChatById(chatId);
         const messages = await chat.fetchMessages({ limit: limit });
+        // Process messages and download media
+        const messageList = [];
+        
+        for (const msg of messages) {
+            const messageData = {
+                id: msg.id._serialized,
+                body: msg.body,
+                from: msg.from,
+                to: msg.to,
+                fromMe: msg.fromMe,
+                timestamp: msg.timestamp,
+                hasMedia: msg.hasMedia,
+                type: msg.type,
+                ack: msg.ack
+            };
 
-        const messageList = messages.map(msg => ({
-            id: msg.id._serialized,
-            body: msg.body,
-            from: msg.from,
-            to: msg.to,
-            fromMe: msg.fromMe,
-            timestamp: msg.timestamp,
-            hasMedia: msg.hasMedia,
-            type: msg.type,
-            ack: msg.ack
-        }));
+            // Download media if available - call on original msg object
+            if (msg.hasMedia && withMedia === true) {
+                try {
+                    const media = await msg.downloadMedia();
+                    messageData.media = {
+                        data: media.data,
+                        mimetype: media.mimetype,
+                        filename: media.filename
+                    };
+                    console.log(`Media downloaded for message ${msg.id._serialized}`);
+                } catch (mediaError) {
+                    console.error(`Failed to download media for message ${msg.id._serialized}:`, mediaError);
+                    messageData.mediaError = 'Failed to download media';
+                }
+            }
+
+            messageList.push(messageData);
+        }
 
         res.json({ messages: messageList });
     } catch (error) {
@@ -914,6 +1622,59 @@ expressApp.post('/api/send-message', verifyDeviceToken, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// Send button message
+expressApp.post('/api/send-buttons', verifyDeviceToken, async (req, res) => {
+    try {
+        if (!isClientReady) {
+            return res.status(400).json({ error: 'Client not ready' });
+        }
+
+        req.body = {
+            "number": "201096869285",
+            "text": "Welcome to Medians 👋\nHow can we help you?",
+            "footer": "Medians Support",
+            "buttons": [
+                "📦 Track Order",
+                "💬 Talk to Agent",
+                "❌ Cancel"
+            ]
+        };
+
+        const { number, text, footer, buttons } = req.body;
+
+        if (!number || !text || !buttons || !buttons.length) {
+            return res.status(400).json({ error: 'number, text and buttons are required' });
+        }
+
+        const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+
+        const btns = buttons.map((b, i) => ({
+            buttonId: `btn_${i}`,
+            buttonText: { displayText: b },
+            type: 1
+        }));
+
+        const buttonMessage = new Buttons(
+            text,
+            btns,
+            'Choose an option',
+            footer || ''
+        );
+
+        const sent = await whatsappClient.sendMessage(chatId, buttonMessage);
+
+        res.json({
+            success: true,
+            messageId: sent.id._serialized
+        });
+
+    } catch (error) {
+        console.error('Button send error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 
 // Send media message
 expressApp.post('/api/send-media', verifyDeviceToken, upload.single('file'), async (req, res) => {
@@ -1146,7 +1907,7 @@ expressApp.post('/api/webhook-test', verifyDeviceToken, async (req, res) => {
     try {
         await axios.post(config.url, {
             event: 'test',
-            data: { message: 'Webhook test from ChromWhatsApp' },
+            data: { message: 'Webhook test from BedayaWhatsApp' },
             timestamp: new Date().toISOString()
         }, {
             headers: {
@@ -1478,6 +2239,37 @@ expressApp.delete('/api/admin/device/:deviceId', verifyAdminToken, (req, res) =>
 
 // Electron App
 
+let splashWindow = null;
+
+function createSplashScreen() {
+    splashWindow = new BrowserWindow({
+        width: 600,
+        height: 400,
+        transparent: true,
+        frame: false,
+        alwaysOnTop: true,
+        resizable: false,
+        skipTaskbar: false,
+        webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true
+        },
+        icon: path.join(__dirname, 'icon.png'),
+        backgroundColor: '#0a1014'
+    });
+
+    splashWindow.loadFile(path.join(__dirname, 'splash.html'));
+    splashWindow.center();
+    splashWindow.show();
+}
+
+function closeSplashScreen() {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.close();
+        splashWindow = null;
+    }
+}
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1400,
@@ -1498,6 +2290,8 @@ function createWindow() {
     mainWindow.loadURL(`http://localhost:${PORT}`);
 
     mainWindow.once('ready-to-show', () => {
+        // Close splash screen and show main window
+        closeSplashScreen();
         mainWindow.show();
     });
 
@@ -1657,7 +2451,7 @@ function createTray() {
         }
     ]);
 
-    tray.setToolTip('ChromWhatsApp');
+    tray.setToolTip('BedayaWhatsApp');
     tray.setContextMenu(contextMenu);
 
     tray.on('double-click', () => {
@@ -1682,10 +2476,13 @@ app.whenReady().then(async () => {
             console.log(`Server running on http://localhost:${PORT}`);
         });
 
+        // Show splash screen immediately
+        createSplashScreen();
+
         // Don't auto-initialize - wait for user to select session
         // The client will request session list and choose one
         
-        // Create Electron window
+        // Create Electron window (will load in background while splash shows)
         createWindow();
         createTray();
 

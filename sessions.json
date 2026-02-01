@@ -1,8 +1,9 @@
 [
   {
-    "id": "default",
-    "name": "Default Session",
-    "createdAt": "2026-01-23T00:00:00.000Z",
-    "active": false
+    "id": "session-1769836151398",
+    "name": "Default",
+    "createdAt": "2026-01-31T05:09:11.398Z",
+    "active": true,
+    "lastUsed": "2026-01-31T14:26:00.339Z"
   }
 ]

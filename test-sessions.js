@@ -110,13 +110,13 @@ const checkServer = http.request('http://localhost:3030/api/health', (res) => {
         testSessionManagement();
     } else {
         console.error('❌ Server returned status:', res.statusCode);
-        console.error('Please start the ChromWhatsApp server first with: npm start');
+        console.error('Please start the BedayaWhatsApp server first with: npm start');
     }
 });
 
 checkServer.on('error', (error) => {
     console.error('❌ Cannot connect to server');
-    console.error('Please start the ChromWhatsApp server first with: npm start');
+    console.error('Please start the BedayaWhatsApp server first with: npm start');
     console.error('Error:', error.message);
 });
 
