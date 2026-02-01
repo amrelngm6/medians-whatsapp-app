@@ -1483,7 +1483,7 @@ expressApp.get('/api/message/:messageId', verifyDeviceToken, async (req, res) =>
             return res.status(400).json({ error: 'Client not ready' });
         }
         const { messageId } = req.params;
-        const withMedia = req.query.withMedia || 'false';
+        const withMedia = req.query.withMedia == 'true';
         const message = await whatsappClient.getMessageById(messageId);
         if (!message) {
             return res.status(404).json({ error: 'Message not found' });
@@ -1500,7 +1500,7 @@ expressApp.get('/api/message/:messageId', verifyDeviceToken, async (req, res) =>
             ack: message.ack
         };
         // Download media if available
-        if (message.hasMedia && withMedia == 'true') {
+        if (message.hasMedia && withMedia === true) {
             try {
                 const media = await message.downloadMedia();
                 messageData.media = {
@@ -1559,7 +1559,6 @@ expressApp.get('/api/messages/:chatId', verifyDeviceToken, async (req, res) => {
                         mimetype: media.mimetype,
                         filename: media.filename
                     };
-                    console.log(`Media downloaded for message ${msg.id._serialized}`);
                 } catch (mediaError) {
                     console.error(`Failed to download media for message ${msg.id._serialized}:`, mediaError);
                     messageData.mediaError = 'Failed to download media';
