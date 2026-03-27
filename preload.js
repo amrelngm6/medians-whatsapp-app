@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // App info
     getAppInfo: () => ({
         name: 'BedayaWhatsApp',
-        version: '0.1.0'
+        version: '0.1.2'
     }),
 
     // Window controls

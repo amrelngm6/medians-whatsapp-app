@@ -1,6 +1,6 @@
 {
   "name": "bedayawhatsapp",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Professional WhatsApp Desktop Application with API & Webhook Support",
   "main": "main.js",
   "author": "BedayaWhatsApp",

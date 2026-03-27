@@ -18,8 +18,41 @@ const { nativeImage } = require('electron');
 const cors = require('cors');
 const { autoUpdater } = require('electron-updater');
 
+// Settings Configuration
+const settingsFile = path.join(__dirname, 'settings.json');
+
+// Load settings
+function loadSettings() {
+    if (fs.existsSync(settingsFile)) {
+        try {
+            const data = fs.readFileSync(settingsFile, 'utf8');
+            return JSON.parse(data);
+        } catch (err) {
+            console.error('Error loading settings:', err);
+        }
+    }
+    // Default settings
+    return {
+        port: parseInt(process.env.PORT) || 3030
+    };
+}
+
+// Save settings
+function saveSettings(settings) {
+    try {
+        fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2));
+        return true;
+    } catch (err) {
+        console.error('Error saving settings:', err);
+        return false;
+    }
+}
+
+// Load current settings
+let appSettings = loadSettings();
+
 // Configuration
-const PORT = process.env.PORT || 3030;
+const PORT = appSettings.port;
 const AUTH_ENABLED = process.env.AUTH_ENABLED === 'true';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'medians';
 const WEBHOOK_URL = process.env.WEBHOOK_URL || '';
@@ -1446,6 +1479,7 @@ expressApp.get('/api/chats', verifyDeviceToken, async (req, res) => {
                             id: chatId,
                             name: chat.name || chat.pushname || chat.formattedTitle || 'Unknown',
                             isGroup: chat.isGroup || false,
+                            number: chatId.split('@')[0] || '',
                             unreadCount: chat.unreadCount || 0,
                             timestamp: chat.timestamp || chat.t || Date.now(),
                             archived: chat.archived || chat.archive || false,
@@ -1532,8 +1566,44 @@ expressApp.get('/api/messages/:chatId', verifyDeviceToken, async (req, res) => {
         const limit = parseInt(req.query.limit) || 50;
         const withMedia = req.query.withMedia === 'true';
         console.log(`Fetching up to ${limit} messages from chat ${chatId} (withMedia=${withMedia})`);
-        const chat = await whatsappClient.getChatById(chatId);
-        const messages = await chat.fetchMessages({ limit: limit });
+        
+        let messages = [];
+        try {
+            const chat = await whatsappClient.getChatById(chatId);
+            messages = await chat.fetchMessages({ limit: limit });
+        } catch (fetchErr) {
+            console.error(`Standard fetch failed for ${chatId}, trying fallback:`, fetchErr.message);
+            // Fallback: direct store access
+            try {
+                const fallbackData = await whatsappClient.pupPage.evaluate(async (targetId, count) => {
+                    // Safety check for store
+                    if (!window.Store || !window.Store.Msg) return [];
+                    
+                    const chatMsgs = window.Store.Msg.models.filter(m => m.id.remote === targetId);
+                    const sorted = chatMsgs.sort((a, b) => (b.t || 0) - (a.t || 0)).slice(0, count);
+                    
+                    return sorted.reverse().map(m => ({
+                        id: { _serialized: m.id._serialized },
+                        body: m.body || '',
+                        from: m.from && typeof m.from === 'object' && m.from._serialized ? m.from._serialized : (m.from || ''),
+                        to: m.to && typeof m.to === 'object' && m.to._serialized ? m.to._serialized : (m.to || ''),
+                        fromMe: m.id.fromMe,
+                        timestamp: m.t || Date.now() / 1000,
+                        hasMedia: m.isMedia || m.isMms || ['image', 'video', 'audio', 'document', 'sticker'].includes(m.type),
+                        type: m.type,
+                        ack: m.ack,
+                        _isFallback: true
+                    }));
+                }, chatId, limit);
+                
+                messages = fallbackData;
+                console.log(`Fallback recovered ${messages.length} messages`);
+            } catch (fallbackErr) {
+                console.error('Fallback also failed:', fallbackErr.message);
+                throw new Error(`Could not fetch messages: ${fetchErr.message}`);
+            }
+        }
+
         // Process messages and download media
         const messageList = [];
         
@@ -1541,7 +1611,7 @@ expressApp.get('/api/messages/:chatId', verifyDeviceToken, async (req, res) => {
             const messageData = {
                 id: msg.id._serialized,
                 body: msg.body,
-                from: msg.from,
+                from: msg.from, // fallback ensures this is string
                 to: msg.to,
                 fromMe: msg.fromMe,
                 timestamp: msg.timestamp,
@@ -1551,7 +1621,8 @@ expressApp.get('/api/messages/:chatId', verifyDeviceToken, async (req, res) => {
             };
 
             // Download media if available - call on original msg object
-            if (msg.hasMedia && withMedia === true) {
+            // Only attempt download if it's a real Message object with the method
+            if (msg.hasMedia && withMedia === true && typeof msg.downloadMedia === 'function') {
                 try {
                     const media = await msg.downloadMedia();
                     messageData.media = {
@@ -1904,7 +1975,7 @@ expressApp.post('/api/webhook-test', verifyDeviceToken, async (req, res) => {
     }
     
     try {
-        await axios.post(config.url, {
+        let result = await axios.post(config.url, {
             event: 'test',
             data: { message: 'Webhook test from BedayaWhatsApp' },
             timestamp: new Date().toISOString()
@@ -1915,11 +1986,72 @@ expressApp.post('/api/webhook-test', verifyDeviceToken, async (req, res) => {
             },
             timeout: 10000
         });
-        
+        console.log('Webhook test result:', result.data);
         res.json({ success: true, message: 'Test webhook sent successfully' });
     } catch (error) {
         res.status(500).json({ error: `Webhook test failed: ${error.message}` });
     }
+});
+
+// ========================================================================
+// SETTINGS ROUTES
+// ========================================================================
+
+// Get application settings
+expressApp.get('/api/settings', verifyDeviceToken, (req, res) => {
+    const settings = loadSettings();
+    res.json(settings);
+});
+
+// Update application settings
+expressApp.post('/api/settings', verifyDeviceToken, (req, res) => {
+    const { port } = req.body;
+    
+    const currentSettings = loadSettings();
+    const newSettings = { ...currentSettings };
+    
+    // Validate port
+    if (port !== undefined) {
+        const portNum = parseInt(port);
+        if (isNaN(portNum) || portNum < 1024 || portNum > 65535) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Invalid port number. Must be between 1024 and 65535.' 
+            });
+        }
+        newSettings.port = portNum;
+    }
+    
+    if (saveSettings(newSettings)) {
+        // Update in-memory settings
+        appSettings = newSettings;
+        
+        res.json({ 
+            success: true, 
+            message: 'Settings saved. Restart the application to apply changes.',
+            settings: newSettings,
+            requiresRestart: newSettings.port !== PORT
+        });
+    } else {
+        res.status(500).json({ 
+            success: false, 
+            error: 'Failed to save settings' 
+        });
+    }
+});
+
+// Restart application
+expressApp.post('/api/restart', verifyDeviceToken, (req, res) => {
+    res.json({ 
+        success: true, 
+        message: 'Application is restarting...' 
+    });
+    
+    // Give time for response to send
+    setTimeout(() => {
+        app.relaunch();
+        app.exit(0);
+    }, 1000);
 });
 
 // ========================================================================

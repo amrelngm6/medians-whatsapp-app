@@ -4,3 +4,8 @@
 node_modules
 dist
 public
+settings.json
+devices.json
+sessions.json
+webhook-config.json
+uploads/

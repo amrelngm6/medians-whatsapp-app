@@ -208,11 +208,41 @@ For detailed implementation, see [AUTO_UPDATE.md](AUTO_UPDATE.md).
 
 ## Configuration
 
+### Server Port Configuration
+
+The server port can be configured through the Settings UI or via the `settings.json` file. This allows you to run multiple instances of ChromWhatsApp on the same device.
+
+**Via Settings UI:**
+1. Open the application
+2. Click Settings (gear icon)
+3. Navigate to "Server Configuration" section
+4. Enter your desired port (1024-65535)
+5. Click "Save & Restart"
+6. Application will restart with the new port
+
+**Via settings.json:**
+```json
+{
+  "port": 3030
+}
+```
+
+**Running Multiple Instances:**
+1. Install the portable version or make copies of the app folder
+2. Configure each instance with a different port (e.g., 3030, 3031, 3032)
+3. Launch each instance
+4. Access each instance via its port: `http://localhost:3030`, `http://localhost:3031`, etc.
+
+**API Endpoints:**
+- `GET /api/settings` - Get current settings
+- `POST /api/settings` - Update settings
+- `POST /api/restart` - Restart application
+
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | 3030 | Server port |
+| `PORT` | 3030 | Default server port (overridden by settings.json) |
 | `HOST` | 127.0.0.1 | Server host |
 | `AUTH_ENABLED` | true | Enable API authentication |
 | `ADMIN_TOKEN` | medians | Admin authentication token |
@@ -424,5 +454,6 @@ MIT License - See LICENSE file for details.
 ## Disclaimer
 
 This project is not affiliated with WhatsApp or Meta. Use responsibly and in accordance with WhatsApp's Terms of Service.
-#   m e d i a n s - w h a t s a p p - a p p  
+#   m e d i a n s - w h a t s a p p - a p p 
+ 
  
